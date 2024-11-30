@@ -18,6 +18,7 @@ def parse_args():
     p_create.add_argument(metavar="<nr cores>", dest="cores", type=int)
     p_create.add_argument(metavar="<memory>", dest="memory", type=str)
     p_create.add_argument(metavar="<disk size>", dest="disk_size", type=str)
+    p_create.add_argument("--encrypt-disk", metavar="<key id>", type=str)
 
     p_delete = action.add_parser("delete", help="Delete vm")
     p_delete.add_argument(metavar="<name>", dest="name", type=str)
@@ -40,7 +41,7 @@ def main():
 
     elif args.action == "create":
         vms2.create_vm(args.name, args.cores, vms2.parse_size(args.memory),
-                       vms2.parse_size(args.disk_size))
+                       vms2.parse_size(args.disk_size), args.encrypt_disk)
 
     elif args.action == "delete":
         vms2.delete_vm(args.name)

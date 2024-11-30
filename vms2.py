@@ -26,9 +26,11 @@ VM_DIR = os.path.join(CEPHFS_MOUNTPOINT, "vms")
 FW_DIR = os.path.join(CEPHFS_MOUNTPOINT, "fw")
 STATE_FILE = os.path.join(CEPHFS_MOUNTPOINT, "config", "state.json")
 
-SPICE_PORT_DIR = '/tmp/tsl_vms/spice_ports'
-SPICE_PORT_MIN = 51000
-SPICE_PORT_MAX = 51999
+SPICE_PORT_DIR = '/tmp/vms2/spice_ports'
+SPICE_PORT_MIN = 52000
+SPICE_PORT_MAX = 52999
+
+ENCRYPT_SECRET_FILE_DIR = "/srv/vms2/disk_secrets"
 
 
 logger = logging.getLogger("vms2")
@@ -52,12 +54,15 @@ def list_vms():
     return sorted(os.listdir(VM_DIR))
 
 
-def create_vm(name, cores, memory, disk_size):
+def create_vm(name, cores, memory, disk_size, disk_encrypt_key_id=None):
     _ensure_mounted()
     _check_name(name)
     _check_cores(cores)
     _check_memory(memory)
     _check_disk_size(disk_size)
+
+    if disk_encrypt_key_id is not None:
+        _check_secret_key_id(disk_encrypt_key_id)
 
     if name in os.listdir(VM_DIR):
         raise VMExists(name)
@@ -73,14 +78,19 @@ def create_vm(name, cores, memory, disk_size):
         'cores': cores,
         'memory': memory,
         'fwmode': 'uefi',
-        'nics': []
+        'nics': [],
+        'disks': [{
+            'type': 'rbd',
+            'image': name,
+            'encrypt_key_id': disk_encrypt_key_id
+        }]
     }
 
     with open(os.path.join(vmdir, 'config.json'), 'w') as f:
         f.write(json.dumps(cfg, indent=4) + '\n')
 
     # Create rbd image for disk
-    _create_rbd_image(name, disk_size)
+    _create_rbd_image(name, disk_size, encrypt=disk_encrypt_key_id)
 
     # Copy nvram.flash
     shutil.copyfile(
@@ -89,6 +99,7 @@ def create_vm(name, cores, memory, disk_size):
 
 
 def delete_vm(name):
+    _ensure_mounted()
     _ensure_exists(name)
 
     # Lock
@@ -102,6 +113,7 @@ def delete_vm(name):
 
 
 def add_nic(name, network):
+    _ensure_mounted()
     _ensure_exists(name)
     _check_network(network)
 
@@ -130,29 +142,63 @@ def add_nic(name, network):
         _write_state(state)
 
 
-def run_vm(name):
+def run_vm(name, iso_img=None):
+    _ensure_mounted()
     _ensure_exists(name)
     with _locked(name):
         vmdir = os.path.join(VM_DIR, name)
         cfg = _read_vm_config(name)
 
+        env = {}
+
         if cfg['fwmode'] != 'uefi':
             raise VMS2Exception("Non-UEFI vms are not supported yet")
 
-        disks = [
-                '-drive', 'format=rbd,file=rbd:vms2/%s:conf=%s:id=%s' % (name, CEPH_CONFFILE, CEPH_ID)
-        ]
+        disks = []
+        for i,d in enumerate(cfg['disks']):
+            if d['type'] == 'rbd':
+                enc_opts = ""
+                enc_args = []
 
-        nics = []
-        for i,n in enumerate(cfg['nics']):
-            if n['type'] == 'bridge':
-                script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
-                nics += ['-netdev', 'tap,id=nic%d,script=%s,downscript=no' % (i, script)]
+                if (key_id:=d['encrypt_key_id']) is not None:
+                    _check_secret_key_id(key_id)
+                    enc_opts = ",encrypt.format=luks2,encrypt.key-secret=disk%d" % i
+                    enc_args = [
+                            '-object',
+                            'secret,id=disk%d,file=%s,format=raw' %
+                                (i, _determine_encrypt_secret_file(key_id))
+                    ]
+
+                disks += [
+                        '-drive', 'format=rbd,file=rbd:vms2/%s:conf=%s:id=%s%s' %
+                            (d['image'], CEPH_CONFFILE, CEPH_ID, enc_opts),
+                        *enc_args
+                ]
 
             else:
-                raise VMS2Exception
+                raise VMS2Exception("Unsupported disk type")
+
+        nics = []
+        brdesc = []
+        for i,n in enumerate(cfg['nics']):
+            if n['type'] == 'bridge':
+                ifname = 'tap%d' % i
+                script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
+                nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
+                brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
+
+            else:
+                raise VMS2Exception("Unsupported nic type")
 
             nics += ['-device', 'virtio-net,netdev=nic%d,mac=%s' % (i, n['mac'])]
+
+        if brdesc:
+            env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
+
+        iso_args = []
+        if iso_img is not None:
+            print("Booting from ISO image `%s'." % iso_img)
+            iso_args = ['-cdrom', iso_img, '-boot', 'd']
 
         with _get_free_spice_port() as spice_port:
             spice_password = _generate_spice_password()
@@ -170,9 +216,14 @@ def run_vm(name):
                 '-drive', 'if=pflash,format=raw,file=%s' % os.path.join(vmdir, 'nvram.flash'),
                 *disks,
                 *nics,
-                '-vga', 'qxl', '-spice', 'port=%d,password=%s' % (spice_port, spice_password),
-                '-global', 'PIIX4_PM.disable_s3=0'
-            ])
+                '-vga', 'qxl', '-spice', 'port=%d,password-secret=spice' % spice_port,
+                # This is not more secure than passing the password directly,
+                # but silences the warning...
+                '-object', 'secret,id=spice,data=%s,format=raw' % spice_password,
+                '-global', 'PIIX4_PM.disable_s3=0',
+                *iso_args
+            ],
+            env=env)
 
             if ret.returncode != 0:
                 raise VMS2Exception("Failed to run vm")
@@ -286,7 +337,7 @@ def _read_vm_config(name):
         return json.loads(f.read().strip())
 
 
-def _create_rbd_image(name, size):
+def _create_rbd_image(name, size, encrypt=None):
     ret = subprocess.run([
         'rbd',
         '--id', CEPH_ID, '-c', CEPH_CONFFILE,
@@ -297,6 +348,33 @@ def _create_rbd_image(name, size):
 
     if ret.returncode != 0:
         raise VMS2Exception("Failed to create rbd image")
+
+    # Enable encrypt if specified
+    if encrypt:
+        logger.info("Encrypting image with key with id %s" % encrypt)
+        key_file = _determine_encrypt_secret_file(encrypt)
+
+        ret = subprocess.run([
+            'rbd',
+            '--id', CEPH_ID, '-c', CEPH_CONFFILE,
+            'encryption', 'format',
+            RBD_POOL + '/' + name, 'luks2', key_file])
+
+        if ret.returncode != 0:
+            raise VMS2Exception("Failed to format rbd image for encryption")
+
+        ret = subprocess.run([
+            'rbd',
+            '--id', CEPH_ID, '-c', CEPH_CONFFILE,
+            'resize',
+            RBD_POOL + '/' + name,
+            '--size', '%dM' % int(math.ceil(size / 1024**2)),
+            '--encryption-passphrase-file', key_file,
+            '--no-progress'])
+
+        if ret.returncode != 0:
+            raise VMS2Exception("Failed to resize image after formatting for encryption")
+
 
 def _delete_rbd_image(name):
     print("Deleting RBD image:")
@@ -315,6 +393,10 @@ def _generate_spice_password(length=20):
     Generate a password for use with spice
     """
     return secrets.token_urlsafe(length)
+
+
+def _determine_encrypt_secret_file(secret_name):
+    return os.path.join(ENCRYPT_SECRET_FILE_DIR, secret_name)
 
 
 @contextmanager
@@ -348,6 +430,10 @@ def _get_free_spice_port():
 def _check_name(name):
     if not re.fullmatch(r'[0-9a-zA-Z_.-]+', name):
         raise VMS2Exception("Invalid vm name")
+
+def _check_secret_key_id(id_):
+    if not re.fullmatch(r'[0-9a-zA-Z_.-]+', id_):
+        raise VMS2Exception("Invalid secret key id")
 
 def _check_cores(cores):
     if cores < 1 or cores > 256:
