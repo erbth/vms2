@@ -259,7 +259,7 @@ def run_vm(name, iso_img=None):
                 else:
                     raise VMS2Exception("Unsupported nic type")
 
-                nics += ['-device', 'virtio-net,netdev=nic%d,mac=%s' % (i, n['mac'])]
+                nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
 
             if brdesc:
                 env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
