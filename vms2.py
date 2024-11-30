@@ -142,6 +142,65 @@ def add_nic(name, network):
         _write_state(state)
 
 
+def clone_vm(src_name, dst_name):
+    _ensure_mounted()
+    _check_name(src_name)
+    _check_name(dst_name)
+    _ensure_exists(src_name)
+
+    if dst_name in os.listdir(VM_DIR):
+        raise VMExists(dst_name)
+
+    with _locked(src_name):
+        # Create directory
+        vmdir = os.path.join(VM_DIR, dst_name)
+        os.mkdir(vmdir, 0o755)
+
+        src_cfg = _read_vm_config(src_name)
+
+        # Create config file
+        cfg = {}
+        for k in ['name', 'platform', 'cores', 'memory', 'fwmode']:
+            cfg[k] = src_cfg[k]
+
+        disks = []
+        disks_to_clone = []
+        for d in src_cfg['disks']:
+            if d['type'] != 'rbd':
+                raise VMS2Exception("Unsupported disk type")
+
+            src_image = d['image']
+            if src_name not in src_image:
+                raise VMS2Exception("Disk without src vm name")
+
+            dst_image = src_image.replace(src_name, dst_name)
+
+            disks.append({
+                'type': 'rbd',
+                'image': dst_image,
+                'encrypt_key_id': d['encrypt_key_id']
+            })
+
+            disks_to_clone.append((src_image, dst_image))
+
+        cfg['disks'] = disks
+
+        nics = []
+        cfg['nics'] = nics
+
+        with open(os.path.join(vmdir, 'config.json'), 'w') as f:
+            f.write(json.dumps(cfg, indent=4) + '\n')
+
+        # Clone rbd images
+        for src,dst in disks_to_clone:
+            _clone_rbd_image(src, dst)
+
+        # Copy nvram.flash
+        shutil.copyfile(
+                os.path.join(VM_DIR, src_name, 'nvram.flash'),
+                os.path.join(vmdir, 'nvram.flash'))
+
+
 def run_vm(name, iso_img=None):
     _ensure_mounted()
     _ensure_exists(name)
@@ -178,29 +237,35 @@ def run_vm(name, iso_img=None):
             else:
                 raise VMS2Exception("Unsupported disk type")
 
-        nics = []
-        brdesc = []
-        for i,n in enumerate(cfg['nics']):
-            if n['type'] == 'bridge':
-                ifname = 'tap%d' % i
-                script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
-                nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
-                brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
-
-            else:
-                raise VMS2Exception("Unsupported nic type")
-
-            nics += ['-device', 'virtio-net,netdev=nic%d,mac=%s' % (i, n['mac'])]
-
-        if brdesc:
-            env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
-
-        iso_args = []
-        if iso_img is not None:
-            print("Booting from ISO image `%s'." % iso_img)
-            iso_args = ['-cdrom', iso_img, '-boot', 'd']
-
         with _get_free_spice_port() as spice_port:
+            nics = []
+            brdesc = []
+            for i,n in enumerate(cfg['nics']):
+                if n['type'] == 'bridge':
+                    # Interface names must be unique
+                    ifname = 'tap_%d_%d' % (spice_port, i)
+                    script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
+                    nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
+                    brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
+
+                elif n['type'] == 'l2tpv3':
+                    nics += ['-netdev', 'l2tpv3,id=nic%d,src=%s,dst=%s,txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d' %
+                             (i, n['local'][0], n['remote'][0], n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
+
+                else:
+                    raise VMS2Exception("Unsupported nic type")
+
+                nics += ['-device', 'virtio-net,netdev=nic%d,mac=%s' % (i, n['mac'])]
+
+            if brdesc:
+                env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
+
+            iso_args = []
+            if iso_img is not None:
+                print("Booting from ISO image `%s'." % iso_img)
+                iso_args = ['-cdrom', iso_img, '-boot', 'd']
+
+
             spice_password = _generate_spice_password()
 
             print("spice_port:     %s" % spice_port)
@@ -386,6 +451,10 @@ def _delete_rbd_image(name):
 
     if ret.returncode != 0:
         raise VMS2Exception("Failed to delete rbd image")
+
+
+def _clone_rbd_image(src_name, dst_name):
+    raise NotImplementedError
 
 
 def _generate_spice_password(length=20):

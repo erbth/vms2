@@ -27,6 +27,10 @@ def parse_args():
     p_add_nic.add_argument(metavar="<name>", dest="name", type=str, help="VM name")
     p_add_nic.add_argument(metavar="<network>", dest="network", type=str)
 
+    p_clone = action.add_parser("clone", help="Clone a vm")
+    p_clone.add_argument(metavar="<src name>", dest="src_name", type=str)
+    p_clone.add_argument(metavar="<dst name>", dest="dst_name", type=str)
+
     return parser.parse_args()
 
 
