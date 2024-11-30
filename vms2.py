@@ -228,9 +228,11 @@ def run_vm(name, iso_img=None):
                                 (i, _determine_encrypt_secret_file(key_id))
                     ]
 
+                # See https://ceph.io/en/news/blog/2022/qemu-kvm-tuning/
                 disks += [
-                        '-drive', 'format=rbd,file=rbd:vms2/%s:conf=%s:id=%s%s' %
-                            (d['image'], CEPH_CONFFILE, CEPH_ID, enc_opts),
+                        '-drive', 'format=rbd,id=disk%d,file=rbd:vms2/%s:conf=%s:id=%s,if=none,cache=none%s' %
+                            (i, d['image'], CEPH_CONFFILE, CEPH_ID, enc_opts),
+                        '-device', 'virtio-blk-pci,drive=disk%d' % i,
                         *enc_args
                 ]
 
@@ -249,8 +251,10 @@ def run_vm(name, iso_img=None):
                     brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
 
                 elif n['type'] == 'l2tpv3':
-                    nics += ['-netdev', 'l2tpv3,id=nic%d,src=%s,dst=%s,txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d' %
-                             (i, n['local'][0], n['remote'][0], n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
+                    nics += ['-netdev', ('l2tpv3,id=nic%d,src=%s,dst=%s,'
+                                'txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d') %
+                                (i, n['local'][0], n['remote'][0],
+                                 n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
 
                 else:
                     raise VMS2Exception("Unsupported nic type")
