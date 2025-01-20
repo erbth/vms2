@@ -11,7 +11,10 @@ import secrets
 import shutil
 import socket
 import subprocess
+import time
 import uuid
+
+USE_LOCAL = True
 
 CEPH_ID = "vmm"
 CEPH_CONFFILE = "/etc/ceph/vmm.conf"
@@ -19,12 +22,17 @@ CEPH_FSNAME = "cephfs"
 CEPHFS_BASE = "/vms2"
 RBD_POOL = "vms2"
 CEPHFS_MOUNTPOINT = "/srv/vms2/desc_fs"
+LOCAL_DESC_DIR = "/srv/vms2/desc_local"
+
+ZFS_FILESYSTEM = "data/vms2_local_zvol"
+
+DESC_DIR = LOCAL_DESC_DIR if USE_LOCAL else CEPHFS_MOUNTPOINT
 
 MAC_RANGE = "52:55:00:XX:XX:XX"
 
-VM_DIR = os.path.join(CEPHFS_MOUNTPOINT, "vms")
-FW_DIR = os.path.join(CEPHFS_MOUNTPOINT, "fw")
-STATE_FILE = os.path.join(CEPHFS_MOUNTPOINT, "config", "state.json")
+VM_DIR = os.path.join(LOCAL_DESC_DIR, "vms")
+FW_DIR = os.path.join(LOCAL_DESC_DIR, "fw")
+STATE_FILE = os.path.join(LOCAL_DESC_DIR, "config", "state.json")
 
 SPICE_PORT_DIR = '/tmp/vms2/spice_ports'
 SPICE_PORT_MIN = 52000
@@ -80,7 +88,7 @@ def create_vm(name, cores, memory, disk_size, disk_encrypt_key_id=None):
         'fwmode': 'uefi',
         'nics': [],
         'disks': [{
-            'type': 'rbd',
+            'type': 'zfs' if USE_LOCAL else 'rbd',
             'image': name,
             'encrypt_key_id': disk_encrypt_key_id
         }]
@@ -89,8 +97,8 @@ def create_vm(name, cores, memory, disk_size, disk_encrypt_key_id=None):
     with open(os.path.join(vmdir, 'config.json'), 'w') as f:
         f.write(json.dumps(cfg, indent=4) + '\n')
 
-    # Create rbd image for disk
-    _create_rbd_image(name, disk_size, encrypt=disk_encrypt_key_id)
+    # Create image for disk
+    _create_disk_image(name, disk_size, encrypt=disk_encrypt_key_id)
 
     # Copy nvram.flash
     shutil.copyfile(
@@ -105,8 +113,8 @@ def delete_vm(name):
     # Lock
     _lock(name)
 
-    # Remove rbd image
-    _delete_rbd_image(name)
+    # Remove disk image
+    _delete_disk_image(name)
 
     # Remove directory
     shutil.rmtree(os.path.join(VM_DIR, name))
@@ -213,89 +221,161 @@ def run_vm(name, iso_img=None):
         if cfg['fwmode'] != 'uefi':
             raise VMS2Exception("Non-UEFI vms are not supported yet")
 
-        disks = []
-        for i,d in enumerate(cfg['disks']):
-            if d['type'] == 'rbd':
-                enc_opts = ""
-                enc_args = []
+        with _get_free_spice_port() as spice_port:
+            # Disks
+            disks = []
+            luks_mappings = []
 
-                if (key_id:=d['encrypt_key_id']) is not None:
-                    _check_secret_key_id(key_id)
-                    enc_opts = ",encrypt.format=luks2,encrypt.key-secret=disk%d" % i
-                    enc_args = [
-                            '-object',
-                            'secret,id=disk%d,file=%s,format=raw' %
-                                (i, _determine_encrypt_secret_file(key_id))
+            for i,d in enumerate(cfg['disks']):
+                # See https://ceph.io/en/news/blog/2022/qemu-kvm-tuning/
+                blk_type = 'virtio-blk-pci'
+                if 'blk_type' in d:
+                    blk_type = d['blk_type']
+
+                    if blk_type == 'nvme':
+                        blk_type += f',serial=nvme_disk_{i}'
+
+                if d['type'] == 'rbd':
+                    enc_opts = ""
+                    enc_args = []
+
+                    if (key_id:=d['encrypt_key_id']) is not None:
+                        _check_secret_key_id(key_id)
+                        enc_opts = ",encrypt.format=luks2,encrypt.key-secret=disk%d" % i
+                        enc_args = [
+                                '-object',
+                                'secret,id=disk%d,file=%s,format=raw' %
+                                    (i, _determine_encrypt_secret_file(key_id))
+                        ]
+
+                    disks += [
+                            '-drive', 'format=rbd,id=disk%d,file=rbd:vms2/%s:conf=%s:id=%s,if=none,cache=none%s' %
+                                (i, d['image'], CEPH_CONFFILE, CEPH_ID, enc_opts),
+                            '-device', f'{blk_type},drive=disk{i:d}',
+                            *enc_args
                     ]
 
-                # See https://ceph.io/en/news/blog/2022/qemu-kvm-tuning/
-                disks += [
-                        '-drive', 'format=rbd,id=disk%d,file=rbd:vms2/%s:conf=%s:id=%s,if=none,cache=none%s' %
-                            (i, d['image'], CEPH_CONFFILE, CEPH_ID, enc_opts),
-                        '-device', 'virtio-blk-pci,drive=disk%d' % i,
-                        *enc_args
-                ]
+                elif d['type'] == 'local-img':
+                    enc_opts = ""
+                    enc_args = []
 
-            else:
-                raise VMS2Exception("Unsupported disk type")
+                    if (key_id:=d['encrypt_key_id']) is not None:
+                        _check_secret_key_id(key_id)
 
-        with _get_free_spice_port() as spice_port:
-            nics = []
-            brdesc = []
-            for i,n in enumerate(cfg['nics']):
-                if n['type'] == 'bridge':
-                    # Interface names must be unique
-                    ifname = 'tap_%d_%d' % (spice_port, i)
-                    script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
-                    nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
-                    brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
+                        luks_name = 'vms2-%d-%d' % (spice_port, i)
+                        luks_mappings.append((
+                            d['image'],
+                            luks_name,
+                            _determine_encrypt_secret_file(key_id)
+                        ))
 
-                elif n['type'] == 'l2tpv3':
-                    nics += ['-netdev', ('l2tpv3,id=nic%d,src=%s,dst=%s,'
-                                'txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d') %
-                                (i, n['local'][0], n['remote'][0],
-                                 n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
+                        disks += [
+                                '-drive', 'format=raw,id=disk%d,file=%s,if=none,cache=none' %
+                                    (i, os.path.join('/dev/mapper', luks_name)),
+                                '-device', f'{blk_type},drive=disk{i:d}',
+                        ]
+
+                    else:
+                        disks += [
+                                '-drive', 'format=raw,id=disk%d,file=%s,if=none,cache=none' %
+                                    (i, d['image']),
+                                '-device', f'{blk_type},drive=disk{i:d}',
+                        ]
+
+                elif d['type'] == 'zfs':
+                    enc_opts = ""
+                    enc_args = []
+
+                    dev = f"/dev/zvol/{ZFS_FILESYSTEM}/{d['image']}"
+
+                    if (key_id:=d['encrypt_key_id']) is not None:
+                        _check_secret_key_id(key_id)
+
+                        luks_name = 'vms2-%d-%d' % (spice_port, i)
+                        luks_mappings.append((
+                            dev,
+                            luks_name,
+                            _determine_encrypt_secret_file(key_id)
+                        ))
+
+                        disks += [
+                                '-drive', 'format=raw,id=disk%d,file=%s,if=none,cache=none' %
+                                    (i, os.path.join('/dev/mapper', luks_name)),
+                                '-device', f'{blk_type},drive=disk{i:d}',
+                        ]
+
+                    else:
+                        disks += [
+                                '-drive', 'format=raw,id=disk%d,file=%s,if=none,cache=none' %
+                                    (i, dev),
+                                '-device', f'{blk_type},drive=disk{i:d}',
+                        ]
+
 
                 else:
-                    raise VMS2Exception("Unsupported nic type")
+                    raise VMS2Exception("Unsupported disk type")
 
-                nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
+            with _luks_containers(luks_mappings):
+                # Network interfaces
+                nics = []
+                brdesc = []
+                for i,n in enumerate(cfg['nics']):
+                    if n['type'] == 'bridge':
+                        # Interface names must be unique
+                        ifname = 'tap_%d_%d' % (spice_port, i)
+                        script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
+                        nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
+                        brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
 
-            if brdesc:
-                env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
+                    elif n['type'] == 'l2tpv3':
+                        nics += ['-netdev', ('l2tpv3,id=nic%d,src=%s,dst=%s,'
+                                    'txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d') %
+                                    (i, n['local'][0], n['remote'][0],
+                                     n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
 
-            iso_args = []
-            if iso_img is not None:
-                print("Booting from ISO image `%s'." % iso_img)
-                iso_args = ['-cdrom', iso_img, '-boot', 'd']
+                    else:
+                        raise VMS2Exception("Unsupported nic type")
+
+                    nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
+
+                if brdesc:
+                    env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
+
+                if not nics:
+                    nics = ['-nic', 'none']
+
+                iso_args = []
+                if iso_img is not None:
+                    print("Booting from ISO image `%s'." % iso_img)
+                    iso_args = ['-cdrom', iso_img, '-boot', 'order=d']
 
 
-            spice_password = _generate_spice_password()
+                spice_password = _generate_spice_password()
 
-            print("spice_port:     %s" % spice_port)
-            print("spice_password: %s" % spice_password, flush=True)
+                print("spice_port:     %s" % spice_port)
+                print("spice_password: %s" % spice_password, flush=True)
 
-            ret = subprocess.run([
-                'kvm',
-                '-name', cfg['name'],
-                '-M', cfg['platform'],
-                '-cpu', 'host', '-smp', 'cpus=%d,cores=%d' % (cfg['cores'], cfg['cores']),
-                '-m', 'size=%dB' % cfg['memory'],
-                '-drive', 'if=pflash,format=raw,readonly=on,file=%s' % os.path.join(FW_DIR, 'OVMF_CODE.fd'),
-                '-drive', 'if=pflash,format=raw,file=%s' % os.path.join(vmdir, 'nvram.flash'),
-                *disks,
-                *nics,
-                '-vga', 'qxl', '-spice', 'port=%d,password-secret=spice' % spice_port,
-                # This is not more secure than passing the password directly,
-                # but silences the warning...
-                '-object', 'secret,id=spice,data=%s,format=raw' % spice_password,
-                '-global', 'PIIX4_PM.disable_s3=0',
-                *iso_args
-            ],
-            env=env)
+                ret = subprocess.run([
+                    'kvm',
+                    '-name', cfg['name'],
+                    '-M', cfg['platform'],
+                    '-cpu', 'host', '-smp', 'cpus=%d,cores=%d' % (cfg['cores'], cfg['cores']),
+                    '-m', 'size=%dB' % cfg['memory'],
+                    '-drive', 'if=pflash,format=raw,readonly=on,file=%s' % os.path.join(FW_DIR, 'OVMF_CODE.fd'),
+                    '-drive', 'if=pflash,format=raw,file=%s' % os.path.join(vmdir, 'nvram.flash'),
+                    *disks,
+                    *nics,
+                    '-vga', 'qxl', '-spice', 'port=%d,password-secret=spice' % spice_port,
+                    # This is not more secure than passing the password directly,
+                    # but silences the warning...
+                    '-object', 'secret,id=spice,data=%s,format=raw' % spice_password,
+                    '-global', 'PIIX4_PM.disable_s3=0',
+                    *iso_args
+                ],
+                env=env)
 
-            if ret.returncode != 0:
-                raise VMS2Exception("Failed to run vm")
+                if ret.returncode != 0:
+                    raise VMS2Exception("Failed to run vm")
 
 
 # Internal functions
@@ -303,6 +383,9 @@ def _ensure_mounted():
     """
     Mount cephfs if required
     """
+    if USE_LOCAL:
+        return
+
     _ensure_dir(CEPHFS_MOUNTPOINT)
 
     if not os.path.ismount(CEPHFS_MOUNTPOINT):
@@ -406,6 +489,43 @@ def _read_vm_config(name):
         return json.loads(f.read().strip())
 
 
+def _create_disk_image(name, size, encrypt=None):
+    if USE_LOCAL:
+        _create_zfs_image(name, size, encrypt)
+    else:
+        _create_rbd_image(name, size, encrypt)
+
+
+def _create_zfs_image(name, disk_size, encrypt=None):
+    ret = subprocess.run([
+        'zfs', 'create',
+        '-s', '-V', f'{disk_size / 1024**2}M',
+        f'{ZFS_FILESYSTEM}/{name}'])
+
+    if ret.returncode != 0:
+        raise VMS2Exceptoin("Failed to create zvol")
+
+    # Format for encryption if specified
+    if encrypt:
+        logger.info("Encrypting image with key with id %s" % encrypt)
+        key_file = _determine_encrypt_secret_file(encrypt)
+
+        # Wait for device to be created
+        dev = f'/dev/zvol/{ZFS_FILESYSTEM}/{name}'
+        while not os.path.exists(dev):
+            time.sleep(0.01)
+            continue
+
+        ret = subprocess.run([
+            'cryptsetup', 'luksFormat',
+            '--type', 'luks2', '--cipher', 'aes-xts-plain64', '-s', '256', '-h', 'sha256',
+            '-q',
+            dev, key_file])
+
+        if ret.returncode != 0:
+            raise VMS2Exception("Failed to format zvol for encryption")
+
+
 def _create_rbd_image(name, size, encrypt=None):
     ret = subprocess.run([
         'rbd',
@@ -443,6 +563,21 @@ def _create_rbd_image(name, size, encrypt=None):
 
         if ret.returncode != 0:
             raise VMS2Exception("Failed to resize image after formatting for encryption")
+
+
+def _delete_disk_image(name):
+    if USE_LOCAL:
+        _delete_zfs_image(name)
+    else:
+        _delete_rbd_image(name)
+
+
+def _delete_zfs_image(name):
+    ret = subprocess.run([
+        'zfs', 'destroy', f'{ZFS_FILESYSTEM}/{name}'])
+
+    if ret.returncode != 0:
+        raise VMS2Exception("Failed to destroy zvol")
 
 
 def _delete_rbd_image(name):
@@ -497,6 +632,35 @@ def _get_free_spice_port():
         yield port
     finally:
         os.unlink(path)
+
+
+@contextmanager
+def _luks_containers(mappings):
+    opened = []
+
+    try:
+        for file,name,keyfile in mappings:
+            ret = subprocess.run(['cryptsetup', 'open',
+                                  '--type', 'luks',
+                                  '--key-file', keyfile,
+                                  file, name])
+
+            if ret.returncode != 0:
+                raise VMS2Exception(f"Failed to open luks container `{file}'.")
+
+            opened.append(name)
+
+        yield
+
+    finally:
+        errs = []
+        for name in opened:
+            ret = subprocess.run(['cryptsetup', 'close', name])
+            if ret.returncode != 0:
+                errs.append(name)
+
+        if errs:
+            raise VMS2Exception(f"Failed to close luks containers: {', '.join(errs)}")
 
 
 # Validating input
