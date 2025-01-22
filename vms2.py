@@ -80,6 +80,14 @@ def create_vm(name, cores, memory, disk_size, disk_encrypt_key_id=None):
     os.mkdir(vmdir, 0o755)
 
     # Create config file
+    cfg_disks = []
+    if disk_size is not None:
+        cfg_disks.append({
+            'type': 'zfs' if USE_LOCAL else 'rbd',
+            'image': name,
+            'encrypt_key_id': disk_encrypt_key_id
+        })
+
     cfg = {
         'name': name,
         'platform': 'pc-i440fx-3.1',
@@ -87,18 +95,15 @@ def create_vm(name, cores, memory, disk_size, disk_encrypt_key_id=None):
         'memory': memory,
         'fwmode': 'uefi',
         'nics': [],
-        'disks': [{
-            'type': 'zfs' if USE_LOCAL else 'rbd',
-            'image': name,
-            'encrypt_key_id': disk_encrypt_key_id
-        }]
+        'disks': cfg_disks
     }
 
     with open(os.path.join(vmdir, 'config.json'), 'w') as f:
         f.write(json.dumps(cfg, indent=4) + '\n')
 
     # Create image for disk
-    _create_disk_image(name, disk_size, encrypt=disk_encrypt_key_id)
+    if disk_size is not None:
+        _create_disk_image(name, disk_size, encrypt=disk_encrypt_key_id)
 
     # Copy nvram.flash
     shutil.copyfile(
@@ -681,7 +686,7 @@ def _check_memory(memory):
         raise VMS2Exception("Invalid memory size")
 
 def _check_disk_size(size):
-    if size < 1:
+    if size is not None and size < 1:
         raise VMS2Exception("Invalid disk size")
 
 def _check_network(name):
