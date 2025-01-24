@@ -52,7 +52,11 @@ NETWORK_VLAN_MAP = {
     "siteA":        120,
     "siteB":        121,
     "tsl_runtime":  200,
-    "mpip4":        300
+    "mpip4":        300,
+    "mpip4-c1":     301,
+    "mpip4-c2":     302,
+    "mpip4-c3":     303,
+    "mpip4-c4":     304
 }
 
 
@@ -332,16 +336,34 @@ def run_vm(name, iso_img=None):
                         nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
                         brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
 
+                        nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
+
                     elif n['type'] == 'l2tpv3':
                         nics += ['-netdev', ('l2tpv3,id=nic%d,src=%s,dst=%s,'
                                     'txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d') %
                                     (i, n['local'][0], n['remote'][0],
                                      n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
 
+                        nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
+
+                    elif n['type'] == 'vfio':
+                        # Find nic an VF
+                        pci_dir = f'/sys/bus/pci/devices/{n["pci-id"]}'
+                        vf = os.listdir(os.path.join(pci_dir, 'vfio-dev'))[0].replace('vfio', '')
+                        pnic = os.listdir(os.path.join(pci_dir, 'physfn', 'net'))[0]
+
+                        # Set VLAN
+                        subprocess.run(["/bin/ip", "link", "set", pnic, "vf", vf,
+                                        "vlan", str(NETWORK_VLAN_MAP[n['network']])])
+
+                        # MAC address
+                        subprocess.run(["/bin/ip", "link", "set", pnic, "vf", vf,
+                                        "mac", n['mac']])
+
+                        nics += ['-device', f'vfio-pci,host={n["pci-id"]}']
+
                     else:
                         raise VMS2Exception("Unsupported nic type")
-
-                    nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
 
                 if brdesc:
                     env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
