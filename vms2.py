@@ -2,6 +2,7 @@
 Library
 """
 from contextlib import contextmanager
+from dataclasses import dataclass
 import json
 import logging
 import math
@@ -39,6 +40,10 @@ SPICE_PORT_MIN = 52000
 SPICE_PORT_MAX = 52999
 
 ENCRYPT_SECRET_FILE_DIR = "/srv/vms2/disk_secrets"
+
+
+SR_IOV_ALLOCATED_NIC_DIR = '/tmp/vms2/sr_iov_allocated_nic_vfs'
+SR_IOV_NIC_ALLOWED_DRIVERS = ['ixgbe']
 
 
 logger = logging.getLogger("vms2")
@@ -324,85 +329,104 @@ def run_vm(name, iso_img=None):
                 else:
                     raise VMS2Exception("Unsupported disk type")
 
-            with _luks_containers(luks_mappings):
-                # Network interfaces
-                nics = []
-                brdesc = []
-                for i,n in enumerate(cfg['nics']):
-                    if n['type'] == 'bridge':
-                        # Interface names must be unique
-                        ifname = 'tap_%d_%d' % (spice_port, i)
-                        script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
-                        nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
-                        brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
+            with _NicVFManager() as nic_vfmgr:
+                with _luks_containers(luks_mappings):
+                    # Network interfaces
+                    nics = []
+                    brdesc = []
+                    for i,n in enumerate(cfg['nics']):
+                        if n['type'] == 'bridge':
+                            # Interface names must be unique
+                            ifname = 'tap_%d_%d' % (spice_port, i)
+                            script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
+                            nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
+                            brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
 
-                        nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
+                            nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
 
-                    elif n['type'] == 'l2tpv3':
-                        nics += ['-netdev', ('l2tpv3,id=nic%d,src=%s,dst=%s,'
-                                    'txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d') %
-                                    (i, n['local'][0], n['remote'][0],
-                                     n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
+                        elif n['type'] == 'l2tpv3':
+                            nics += ['-netdev', ('l2tpv3,id=nic%d,src=%s,dst=%s,'
+                                        'txsession=%s,rxsession=%s,udp=on,srcport=%d,dstport=%d') %
+                                        (i, n['local'][0], n['remote'][0],
+                                         n['txsession'], n['rxsession'], n['local'][1], n['remote'][1])]
 
-                        nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
+                            nics += ['-device', 'virtio-net-pci,netdev=nic%d,mac=%s' % (i, n['mac'])]
 
-                    elif n['type'] == 'vfio':
-                        # Find nic an VF
-                        pci_dir = f'/sys/bus/pci/devices/{n["pci-id"]}'
-                        vf = os.listdir(os.path.join(pci_dir, 'vfio-dev'))[0].replace('vfio', '')
-                        pnic = os.listdir(os.path.join(pci_dir, 'physfn', 'net'))[0]
+                        elif n['type'] == 'vfio':
+                            # Find free VF
+                            vf = nic_vfmgr.allocate_vf()
 
-                        # Set VLAN
-                        subprocess.run(["/bin/ip", "link", "set", pnic, "vf", vf,
-                                        "vlan", str(NETWORK_VLAN_MAP[n['network']])])
+                            # Set VLAN id
+                            subprocess.run(["/bin/ip", "link", "set", vf.nic, "vf", vf.vf,
+                                            "vlan", str(NETWORK_VLAN_MAP[n['network']])])
 
-                        # MAC address
-                        subprocess.run(["/bin/ip", "link", "set", pnic, "vf", vf,
-                                        "mac", n['mac']])
+                            # Set MAC address
+                            subprocess.run(["/bin/ip", "link", "set", vf.nic, "vf", vf.vf,
+                                            "mac", n['mac']])
 
-                        nics += ['-device', f'vfio-pci,host={n["pci-id"]}']
+                            nics += ['-device', f'vfio-pci,host={vf.pci_id}']
 
+                        else:
+                            raise VMS2Exception("Unsupported nic type")
+
+                    if brdesc:
+                        env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
+
+                    if not nics:
+                        nics = ['-nic', 'none']
+
+
+                    # PCI Devices
+                    pci_devs = []
+                    for p in cfg.get('pci-devices', []):
+                        pci_devs += ['-device', f'vfio-pci,host={p["pci-id"]}']
+
+
+                    iso_args = []
+                    if iso_img is not None:
+                        print("Booting from ISO image `%s'." % iso_img)
+                        iso_args = ['-cdrom', iso_img, '-boot', 'order=d']
+
+
+                    spice_password = _generate_spice_password()
+
+                    print("spice_port:     %s" % spice_port)
+                    print("spice_password: %s" % spice_password, flush=True)
+
+                    machine = []
+                    if cfg['platform'] == 'q35':
+                        machine = [
+                            '-M', f'{cfg["platform"]},kernel-irqchip=split',
+                            '-device', 'intel-iommu,intremap=on,caching-mode=on'
+                        ]
                     else:
-                        raise VMS2Exception("Unsupported nic type")
+                        machine = [
+                            '-M', cfg['platform'],
+                            '-global', 'PIIX4_PM.disable_s3=0'
+                        ]
 
-                if brdesc:
-                    env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
+                    ret = subprocess.run([
+                        'qemu-system-x86_64',
+                        '-name', cfg['name'],
+                        '-accel', 'kvm',
+                        *machine,
+                        '-cpu', 'host', '-smp', 'cpus=%d,cores=%d' % (cfg['cores'], cfg['cores']),
+                        '-m', 'size=%dB' % cfg['memory'],
+                        '-drive', 'if=pflash,format=raw,readonly=on,file=%s' % os.path.join(FW_DIR, 'OVMF_CODE.fd'),
+                        '-drive', 'if=pflash,format=raw,file=%s' % os.path.join(vmdir, 'nvram.flash'),
+                        *disks,
+                        *nics,
+                        *pci_devs,
+                        '-vga', 'qxl', '-spice', 'port=%d,password-secret=spice' % spice_port,
+                        # This is not more secure than passing the password directly,
+                        # but silences the warning...
+                        '-object', 'secret,id=spice,data=%s,format=raw' % spice_password,
+                        *iso_args
+                    ],
+                    env=env)
 
-                if not nics:
-                    nics = ['-nic', 'none']
-
-                iso_args = []
-                if iso_img is not None:
-                    print("Booting from ISO image `%s'." % iso_img)
-                    iso_args = ['-cdrom', iso_img, '-boot', 'order=d']
-
-
-                spice_password = _generate_spice_password()
-
-                print("spice_port:     %s" % spice_port)
-                print("spice_password: %s" % spice_password, flush=True)
-
-                ret = subprocess.run([
-                    'kvm',
-                    '-name', cfg['name'],
-                    '-M', cfg['platform'],
-                    '-cpu', 'host', '-smp', 'cpus=%d,cores=%d' % (cfg['cores'], cfg['cores']),
-                    '-m', 'size=%dB' % cfg['memory'],
-                    '-drive', 'if=pflash,format=raw,readonly=on,file=%s' % os.path.join(FW_DIR, 'OVMF_CODE.fd'),
-                    '-drive', 'if=pflash,format=raw,file=%s' % os.path.join(vmdir, 'nvram.flash'),
-                    *disks,
-                    *nics,
-                    '-vga', 'qxl', '-spice', 'port=%d,password-secret=spice' % spice_port,
-                    # This is not more secure than passing the password directly,
-                    # but silences the warning...
-                    '-object', 'secret,id=spice,data=%s,format=raw' % spice_password,
-                    '-global', 'PIIX4_PM.disable_s3=0',
-                    *iso_args
-                ],
-                env=env)
-
-                if ret.returncode != 0:
-                    raise VMS2Exception("Failed to run vm")
+                    if ret.returncode != 0:
+                        raise VMS2Exception("Failed to run vm")
 
 
 # Internal functions
@@ -688,6 +712,79 @@ def _luks_containers(mappings):
 
         if errs:
             raise VMS2Exception(f"Failed to close luks containers: {', '.join(errs)}")
+
+
+@dataclass
+class _NicVFDesc:
+    nic = None
+    vf = None
+    pci_id = None
+
+    def __hash__(self):
+        return hash((self.nic, self.vf))
+
+class _NicVFManager:
+    def __init__(self):
+        self._allocated_vfs = []
+        self._present_vfs = set()
+
+        # Find all currently present VFs
+        base = '/sys/class/net'
+        for i in os.listdir(base):
+            drv = os.path.join(base, i, 'device', 'driver')
+            if not os.path.exists(drv):
+                continue
+
+            if os.path.basename(os.readlink(drv)) not in SR_IOV_NIC_ALLOWED_DRIVERS:
+                continue
+
+            dev_path = os.path.join(base, i, 'device')
+            for f in os.listdir(dev_path):
+                m = re.fullmatch(r'virtfn(\d+)', f)
+                if not m:
+                    continue
+
+                # Check if the device is bound to vfio
+                vf_path = os.path.join(dev_path, f)
+                if not os.path.exists(os.path.join(vf_path, 'vfio-dev')):
+                    continue
+
+                desc = _NicVFDesc()
+                desc.nic = i
+                desc.vf = m[1]
+
+                # Retrieve pci id
+                desc.pci_id = os.path.basename(os.readlink(vf_path))
+
+                self._present_vfs.add(desc)
+
+        self._present_vfs = sorted(self._present_vfs, key=lambda v: (v.nic, int(v.vf)))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        for vf in self._allocated_vfs:
+            os.unlink(self._alloc_file_path(vf))
+
+    @staticmethod
+    def _alloc_file_path(vf):
+        return os.path.join(SR_IOV_ALLOCATED_NIC_DIR, f'{vf.nic}-{vf.vf}')
+
+    def allocate_vf(self):
+        os.makedirs(SR_IOV_ALLOCATED_NIC_DIR, mode=0o755, exist_ok=True)
+        for vf in self._present_vfs:
+            path = self._alloc_file_path(vf)
+            try:
+                fd = os.open(path, flags=os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode=0o644)
+                os.close(fd)
+                self._allocated_vfs.append(vf)
+                return vf
+
+            except FileExistsError:
+                pass
+
+        raise VMS2Exception("No free SR-IOV nic VF")
 
 
 # Validating input
