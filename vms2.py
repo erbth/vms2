@@ -61,7 +61,8 @@ NETWORK_VLAN_MAP = {
     "mpip4-c1":     301,
     "mpip4-c2":     302,
     "mpip4-c3":     303,
-    "mpip4-c4":     304
+    "mpip4-c4":     304,
+    "miscdev":      400
 }
 
 
