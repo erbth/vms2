@@ -31,6 +31,9 @@ def parse_args():
     p_clone.add_argument(metavar="<src name>", dest="src_name", type=str)
     p_clone.add_argument(metavar="<dst name>", dest="dst_name", type=str)
 
+    p_list_networks = action.add_parser("list-networks",
+                                       help="List configured networks")
+
     return parser.parse_args()
 
 
@@ -53,6 +56,13 @@ def main():
 
     elif args.action == "add-nic":
         vms2.add_nic(args.name, args.network)
+
+    elif args.action == "clone":
+        vms2.clone_vm(args.src_name, args.dst_name)
+
+    elif args.action == "list-networks":
+        for n,v in vms2.list_networks():
+            print(f"{n}: (VLAN id {v})")
 
 
     else:

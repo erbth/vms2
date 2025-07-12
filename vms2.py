@@ -14,6 +14,7 @@ import socket
 import subprocess
 import time
 import uuid
+import yaml
 
 USE_LOCAL = True
 
@@ -48,22 +49,23 @@ SR_IOV_NIC_ALLOWED_DRIVERS = ['ixgbe']
 
 logger = logging.getLogger("vms2")
 
+def _load_config():
+    # Find config file
+    cfgpath = None
+    for p in ['config.yml', '/etc/vms2/config.yml']:
+        if os.path.exists(p):
+            cfgpath = p
+            break
 
-NETWORK_VLAN_MAP = {
-    "default":      1,
-    "local":        30,
-    "transport":    99,
-    "matrix":       100,
-    "siteA":        120,
-    "siteB":        121,
-    "tsl_runtime":  200,
-    "mpip4":        300,
-    "mpip4-c1":     301,
-    "mpip4-c2":     302,
-    "mpip4-c3":     303,
-    "mpip4-c4":     304,
-    "miscdev":      400
-}
+    if not cfgpath:
+        raise RuntimeError("No config file found")
+
+    # Read file
+    with open(cfgpath, 'r') as f:
+        return yaml.load(f.read(), yaml.Loader)
+
+CONFIG = _load_config()
+NETWORK_VLAN_MAP = CONFIG['vlan_map']
 
 
 # Actions
@@ -222,6 +224,15 @@ def clone_vm(src_name, dst_name):
         shutil.copyfile(
                 os.path.join(VM_DIR, src_name, 'nvram.flash'),
                 os.path.join(vmdir, 'nvram.flash'))
+
+
+def list_networks():
+    """
+    List configured networks
+    
+    :returns: List((name, vlan id))
+    """
+    return list(NETWORK_VLAN_MAP.items())
 
 
 def run_vm(name, iso_img=None):

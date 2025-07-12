@@ -1,0 +1,4 @@
+vlan_map:
+  # friendly name, 802.1Q VLAN id
+  lan1:     301
+  special:  2

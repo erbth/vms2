@@ -1,4 +1,6 @@
 *.swp
+*~
 /mysession.vim
+/config.yml
 
 __pycache__
