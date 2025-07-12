@@ -1,4 +1,9 @@
 #!/usr/bin/python3
+
+# Copyright (c) 2025 Thomas Erbesdobler <t.erbesdobler@gmx.de>
+# 
+# SPDX-License-Identifier: MIT
+
 import argparse
 import logging
 import signal

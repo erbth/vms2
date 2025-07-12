@@ -1,4 +1,8 @@
 """
+Copyright (c) 2025 Thomas Erbesdobler <t.erbesdobler@gmx.de>
+
+SPDX-License-Identifier: MIT
+
 Library
 """
 from contextlib import contextmanager
