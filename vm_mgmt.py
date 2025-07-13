@@ -7,6 +7,7 @@
 import argparse
 import logging
 import sys
+import mgr_client
 import vms2
 
 
@@ -39,6 +40,18 @@ def parse_args():
     p_list_networks = action.add_parser("list-networks",
                                        help="List configured networks")
 
+    # Interaction with management daemon
+    p_show_running = action.add_parser("list-running",
+                                       help="List vms running through manager")
+
+    p_start = action.add_parser("start",
+                                help="Start a vm through manager")
+    p_start.add_argument(metavar="<name>", dest="name", type=str, help="vm name")
+
+    p_kill = action.add_parser("kill",
+                               help="Forecefully stop a vm through manager")
+    p_kill.add_argument(metavar="<name", dest="name", type=str, help="vm name")
+
     return parser.parse_args()
 
 
@@ -69,6 +82,19 @@ def main():
         for n,v in vms2.list_networks():
             print(f"{n}: (VLAN id {v})")
 
+
+    elif args.action == 'list-running':
+        print(f"{'Name':20s}Spice")
+        for v in mgr_client.list_running():
+            print(f"{v['name']:20s}{v['spice_port']} / {v['spice_password']}")
+
+    elif args.action == 'start':
+        mgr_client.start(args.name)
+        print(f"VM `{args.name}' started.")
+
+    elif args.action == 'kill':
+        mgr_client.kill(args.name)
+        print(f"VM `{args.name}' stopped forcefully.")
 
     else:
         raise NotImplementedError

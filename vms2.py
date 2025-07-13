@@ -7,6 +7,7 @@ Library
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
+import asyncio
 import json
 import logging
 import math
@@ -239,7 +240,7 @@ def list_networks():
     return list(NETWORK_VLAN_MAP.items())
 
 
-def run_vm(name, iso_img=None):
+async def run_vm(name, iso_img=None):
     _ensure_mounted()
     _ensure_exists(name)
     with _locked(name):
@@ -421,7 +422,7 @@ def run_vm(name, iso_img=None):
                             '-global', 'PIIX4_PM.disable_s3=0'
                         ]
 
-                    ret = subprocess.run([
+                    proc = await asyncio.create_subprocess_exec(
                         'qemu-system-x86_64',
                         '-name', cfg['name'],
                         '-accel', 'kvm',
@@ -438,11 +439,10 @@ def run_vm(name, iso_img=None):
                         # but silences the warning...
                         '-object', 'secret,id=spice,data=%s,format=raw' % spice_password,
                         *iso_args
-                    ],
+                    ,
                     env=env)
 
-                    if ret.returncode != 0:
-                        raise VMS2Exception("Failed to run vm")
+                    return (proc, spice_port, spice_password)
 
 
 # Internal functions
@@ -574,7 +574,7 @@ def _create_zfs_image(name, disk_size, encrypt=None):
 
     # Format for encryption if specified
     if encrypt:
-        logger.info("Encrypting image with key with id %s" % encrypt)
+        eogger.info("Encrypting image with key with id %s" % encrypt)
         key_file = _determine_encrypt_secret_file(encrypt)
 
         # Wait for device to be created

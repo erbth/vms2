@@ -1,0 +1,10 @@
+[Unit]
+Description="vms2 vm manager"
+
+[Service]
+Type=simple
+# Adapt as needed
+ExecStart=/usr/local/bin/vms2_mgr.py
+
+[Install]
+WantedBy=multi-user.target

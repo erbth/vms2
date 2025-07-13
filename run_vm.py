@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: MIT
 
 import argparse
+import asyncio
 import logging
 import signal
 import sys
@@ -21,15 +22,25 @@ def parse_args():
     return parser.parse_args()
 
 
+async def _run_vm(args):
+    p,_,_ = await vms2.run_vm(args.name, args.isoimg)
+    if await p.wait() != 0:
+        raise VMS2Exception("Failed to run vm")
+
+    
 def main():
-    logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
     # Ignore SIGINT and SIGTERM s.t. they are handled by the qemu process only
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
     args = parse_args()
-    vms2.run_vm(args.name, args.isoimg)
+
+    # Required for use of asyncio with subprocesses
+    loop = asyncio.new_event_loop()
+    asyncio.get_child_watcher().attach_loop(loop)
+    loop.run_until_complete(_run_vm(args))
 
 
 if __name__ == '__main__':
