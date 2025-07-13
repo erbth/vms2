@@ -633,10 +633,13 @@ def _create_rbd_image(name, size, encrypt=None):
 
 
 def _delete_disk_image(name):
-    if USE_LOCAL:
-        _delete_zfs_image(name)
-    else:
-        _delete_rbd_image(name)
+    cfg = _read_vm_config(name)
+
+    if cfg['disks']:
+        if USE_LOCAL:
+            _delete_zfs_image(name)
+        else:
+            _delete_rbd_image(name)
 
 
 def _delete_zfs_image(name):
