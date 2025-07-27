@@ -23,9 +23,10 @@ def parse_args():
 
 
 async def _run_vm(args):
-    p,_,_ = await vms2.run_vm(args.name, args.isoimg)
-    if await p.wait() != 0:
-        raise VMS2Exception("Failed to run vm")
+    def _ready_cb(proc, spice_port, spice_password):
+        pass
+
+    await vms2.run_vm(args.name, _ready_cb, args.isoimg)
 
     
 def main():

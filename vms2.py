@@ -240,7 +240,7 @@ def list_networks():
     return list(NETWORK_VLAN_MAP.items())
 
 
-async def run_vm(name, iso_img=None):
+async def run_vm(name, ready_cb, iso_img=None):
     _ensure_mounted()
     _ensure_exists(name)
     with _locked(name):
@@ -442,7 +442,10 @@ async def run_vm(name, iso_img=None):
                     ,
                     env=env)
 
-                    return (proc, spice_port, spice_password)
+                    ready_cb(proc, spice_port, spice_password)
+
+                    if await proc.wait() != 0:
+                        raise vms2.VMS2Exception("Failed to run vm")
 
 
 # Internal functions

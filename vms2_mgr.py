@@ -18,10 +18,11 @@ import vms2
 @dataclasses.dataclass
 class _VMDesc:
     name: str
-    proc: ...
-    watcher: ...
-    spice_port: int
-    spice_password: str
+    proc: ... = None
+    watcher: ... = None
+    spice_port: int = None
+    spice_password: str = None
+    vmm_proc: ... = None
 
 
 class VMS2Mgr:
@@ -114,9 +115,11 @@ class VMS2Mgr:
         return [(v.name, v.spice_port, v.spice_password) for v in self._vms.values()]
 
 
-    async def child_watcher(self, name, proc):
-        if await proc.wait() != 0:
-            logger.warn(f"Failed to run vm `{name}'")
+    async def child_watcher(self, name, desc):
+        try:
+            await desc.proc
+        except vms2.VMS2Exception as exc:
+            logger.warn(f"Failed to run vm `{name}' ({exc:s})")
 
         del self._vms[name]
 
@@ -125,20 +128,24 @@ class VMS2Mgr:
         if name in self._vms:
             raise vms2.VMS2Exception("VM already running")
 
-        proc, spice_port, spice_password = await vms2.run_vm(name)
-        self._vms[name] = _VMDesc(
-            name,
-            proc,
-            asyncio.create_task(self.child_watcher(name, proc)),
-            spice_port = spice_port,
-            spice_password = spice_password)
+        desc = _VMDesc(name)
+
+        def _ready_cb(proc, spice_port, spice_password):
+            desc.vmm_proc = proc
+            desc.spice_port = spice_port
+            desc.spice_password = spice_password
+
+        desc.proc = vms2.run_vm(name, _ready_cb)
+        desc.watcher = asyncio.create_task(self.child_watcher(name, desc))
+
+        self._vms[name] = desc
 
 
     def kill(self, name):
         if name not in self._vms:
             raise vms2.VMS2Exception("VM not running")
 
-        self._vms[name].proc.terminate()
+        self._vms[name].vmm_proc.terminate()
 
 
     async def stop(self):
