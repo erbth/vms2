@@ -21,38 +21,6 @@ import time
 import uuid
 import yaml
 
-USE_LOCAL = True
-
-CEPH_ID = "vmm"
-CEPH_CONFFILE = "/etc/ceph/vmm.conf"
-CEPH_FSNAME = "cephfs"
-CEPHFS_BASE = "/vms2"
-RBD_POOL = "vms2"
-CEPHFS_MOUNTPOINT = "/srv/vms2/desc_fs"
-LOCAL_DESC_DIR = "/srv/vms2/desc_local"
-
-ZFS_FILESYSTEM = "data/vms2_local_zvol"
-
-DESC_DIR = LOCAL_DESC_DIR if USE_LOCAL else CEPHFS_MOUNTPOINT
-
-MAC_RANGE = "52:55:00:XX:XX:XX"
-
-VM_DIR = os.path.join(LOCAL_DESC_DIR, "vms")
-FW_DIR = os.path.join(LOCAL_DESC_DIR, "fw")
-STATE_FILE = os.path.join(LOCAL_DESC_DIR, "config", "state.json")
-
-SPICE_PORT_DIR = '/tmp/vms2/spice_ports'
-SPICE_PORT_MIN = 52000
-SPICE_PORT_MAX = 52999
-
-ENCRYPT_SECRET_FILE_DIR = "/srv/vms2/disk_secrets"
-
-
-SR_IOV_ALLOCATED_NIC_DIR = '/tmp/vms2/sr_iov_allocated_nic_vfs'
-SR_IOV_NIC_ALLOWED_DRIVERS = ['ixgbe']
-
-
-logger = logging.getLogger("vms2")
 
 def _load_config():
     # Find config file
@@ -70,6 +38,40 @@ def _load_config():
         return yaml.load(f.read(), yaml.Loader)
 
 CONFIG = _load_config()
+
+USE_LOCAL = bool(CONFIG.get('use_local_desc', False))
+
+CEPH_ID = "vmm"
+CEPH_CONFFILE = "/etc/ceph/vmm.conf"
+CEPH_FSNAME = "cephfs"
+CEPHFS_BASE = "/vms2"
+RBD_POOL = "vms2"
+CEPHFS_MOUNTPOINT = "/srv/vms2/desc_fs"
+LOCAL_DESC_DIR = "/srv/vms2/desc_local"
+
+ZFS_FILESYSTEM = "data/vms2_local_zvol"
+
+DESC_DIR = LOCAL_DESC_DIR if USE_LOCAL else CEPHFS_MOUNTPOINT
+
+MAC_RANGE = "52:55:00:XX:XX:XX"
+
+VM_DIR = os.path.join(DESC_DIR, "vms")
+FW_DIR = os.path.join(DESC_DIR, "fw")
+STATE_FILE = os.path.join(DESC_DIR, "config", "state.json")
+
+SPICE_PORT_DIR = '/tmp/vms2/spice_ports'
+SPICE_PORT_MIN = 52000
+SPICE_PORT_MAX = 52999
+
+ENCRYPT_SECRET_FILE_DIR = "/srv/vms2/disk_secrets"
+
+
+SR_IOV_ALLOCATED_NIC_DIR = '/tmp/vms2/sr_iov_allocated_nic_vfs'
+SR_IOV_NIC_ALLOWED_DRIVERS = ['ixgbe']
+
+
+logger = logging.getLogger("vms2")
+
 NETWORK_VLAN_MAP = CONFIG['vlan_map']
 
 
@@ -107,7 +109,7 @@ def create_vm(name, cores, memory, disk_size, disk_encrypt_key_id=None):
 
     cfg = {
         'name': name,
-        'platform': 'pc-i440fx-3.1',
+        'platform': 'pc-i440fx-10.0',
         'cores': cores,
         'memory': memory,
         'fwmode': 'uefi',
@@ -355,7 +357,7 @@ async def run_vm(name, ready_cb, iso_img=None):
                         if n['type'] == 'bridge':
                             # Interface names must be unique
                             ifname = 'tap_%d_%d' % (spice_port, i)
-                            script = os.path.join(os.path.dirname(__name__), 'qemu-tap-ifup.py')
+                            script = os.path.join(os.path.dirname(__file__), 'qemu-tap-ifup.py')
                             nics += ['-netdev', 'tap,id=nic%d,ifname=%s,script=%s,downscript=no' % (i, ifname, script)]
                             brdesc.append('%s.%s.%d' % (ifname, n['mac'], NETWORK_VLAN_MAP[n['network']]))
 
@@ -387,7 +389,7 @@ async def run_vm(name, ready_cb, iso_img=None):
                             raise VMS2Exception("Unsupported nic type")
 
                     if brdesc:
-                        env['VMS2_BR_IFUP_DESC'] = '-'.join(brdesc)
+                        env['VMS2_BR_IFUP_DESC'] = '-'.join([CONFIG['bridge_name']] + brdesc)
 
                     if not nics:
                         nics = ['-nic', 'none']
@@ -445,7 +447,7 @@ async def run_vm(name, ready_cb, iso_img=None):
                     ready_cb(proc, spice_port, spice_password)
 
                     if await proc.wait() != 0:
-                        raise vms2.VMS2Exception("Failed to run vm")
+                        raise VMS2Exception("Failed to run vm")
 
 
 # Internal functions

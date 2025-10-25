@@ -15,6 +15,9 @@ import sys
 import vms2
 
 
+logger = logging.getLogger("vms2")
+
+
 @dataclasses.dataclass
 class _VMDesc:
     name: str
@@ -119,11 +122,11 @@ class VMS2Mgr:
         try:
             await desc.proc
         except vms2.VMS2Exception as exc:
-            logger.warn(f"Failed to run vm `{name}' ({exc:s})")
+            logger.warning("Failed to run vm `%(name)s' (%(exc)s)", {'name': name, 'exc': exc})
 
         del self._vms[name]
 
-        
+
     async def start(self, name):
         if name in self._vms:
             raise vms2.VMS2Exception("VM already running")
