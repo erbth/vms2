@@ -89,12 +89,18 @@ def main():
             print(f"{v['name']:20s}{v['spice_port']} / {v['spice_password']}")
 
     elif args.action == 'start':
-        mgr_client.start(args.name)
-        print(f"VM `{args.name}' started.")
+        ret = mgr_client.start(args.name)
+        if ret is None:
+            print(f"VM `{args.name}' started.")
+        else:
+            print(f"Failed to start VM `{args.name}':\n    {ret}")
 
     elif args.action == 'kill':
-        mgr_client.kill(args.name)
-        print(f"VM `{args.name}' stopped forcefully.")
+        ret = mgr_client.kill(args.name)
+        if ret is None:
+            print(f"VM `{args.name}' stopped forcefully.")
+        else:
+            print(f"Failed to start VM `{args.name}':\n    {ret}")
 
     else:
         raise NotImplementedError

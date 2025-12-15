@@ -26,6 +26,7 @@ class _VMDesc:
     spice_port: int = None
     spice_password: str = None
     vmm_proc: ... = None
+    error: str = None
 
 
 class VMS2Mgr:
@@ -108,7 +109,7 @@ class VMS2Mgr:
 
                 except vms2.VMS2Exception as exc:
                     return {'status': 'error', 'msg': str(exc)}
-            
+
             case _:
                 raise RuntimeError(f"Invalid command from client: `{msg['cmd']}'")
 
@@ -124,6 +125,10 @@ class VMS2Mgr:
         except vms2.VMS2Exception as exc:
             logger.warning("Failed to run vm `%(name)s' (%(exc)s)", {'name': name, 'exc': exc})
 
+            # Can be retrieved through a reference to the description - even
+            # after removing the latter from _vms.
+            self._vms[name].error = str(exc)
+
         del self._vms[name]
 
 
@@ -133,15 +138,30 @@ class VMS2Mgr:
 
         desc = _VMDesc(name)
 
+        startup_complete = False
+
         def _ready_cb(proc, spice_port, spice_password):
+            nonlocal startup_complete
+
             desc.vmm_proc = proc
             desc.spice_port = spice_port
             desc.spice_password = spice_password
+
+            startup_complete = True
 
         desc.proc = vms2.run_vm(name, _ready_cb)
         desc.watcher = asyncio.create_task(self.child_watcher(name, desc))
 
         self._vms[name] = desc
+
+        while True:
+            if startup_complete:
+                return
+
+            if desc.error is not None:
+                raise vms2.VMS2Exception(f"Failed to start VM: {desc.error}")
+
+            await asyncio.sleep(.001)
 
 
     def kill(self, name):

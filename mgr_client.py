@@ -37,8 +37,26 @@ def list_running():
 
 
 def start(name):
-    _cmd('start', vm_name=name)
+    """
+    :returns: None in case of success, an error message otherwise
+    """
+    ret = _cmd('start', vm_name=name)
+    if ret['status'] == 'success':
+        return None
+    elif ret['status'] == 'error':
+        return ret['msg']
+    else:
+        return "Protocol error."
 
 
 def kill(name):
+    """
+    :returns: None in case of success, an error message otherwise
+    """
     _cmd('kill', vm_name=name)
+    if ret['status'] == 'success':
+        return None
+    elif ret['status'] == 'error':
+        return ret['msg']
+    else:
+        return "Protocol error."
