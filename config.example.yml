@@ -2,3 +2,9 @@ vlan_map:
   # friendly name, 802.1Q VLAN id
   lan1:     301
   special:  2
+
+# Use local instead of cephfs-shared VM description (defaults to false)
+#use_local_desc: false
+
+# Name of the VLAN aware bridge to use for the VMs
+bridge_name: br0
