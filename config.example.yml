@@ -5,6 +5,7 @@ vlan_map:
 
 # Use local instead of cephfs-shared VM description (defaults to false)
 #use_local_desc: false
+#zfs_filesystem: ...   # default: data/vms2_local_zvol
 
 # Name of the VLAN aware bridge to use for the VMs
 bridge_name: br0

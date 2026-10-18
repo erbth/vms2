@@ -14,7 +14,7 @@ def main():
     dev = sys.argv[1]
 
     brdesc = os.environ['VMS2_BR_IFUP_DESC']
-    brdesc = brdesc.split('-')
+    brdesc = brdesc.split('%')
     brname = brdesc[0]
     brdesc = brdesc[1:]
     brdesc = {

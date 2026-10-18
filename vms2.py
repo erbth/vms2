@@ -49,7 +49,7 @@ RBD_POOL = "vms2"
 CEPHFS_MOUNTPOINT = "/srv/vms2/desc_fs"
 LOCAL_DESC_DIR = "/srv/vms2/desc_local"
 
-ZFS_FILESYSTEM = "data/vms2_local_zvol"
+ZFS_FILESYSTEM = CONFIG.get('zfs_filesystem', "data/vms2_local_zvol")
 
 DESC_DIR = LOCAL_DESC_DIR if USE_LOCAL else CEPHFS_MOUNTPOINT
 
@@ -389,7 +389,7 @@ async def run_vm(name, ready_cb, iso_img=None):
                             raise VMS2Exception("Unsupported nic type")
 
                     if brdesc:
-                        env['VMS2_BR_IFUP_DESC'] = '-'.join([CONFIG['bridge_name']] + brdesc)
+                        env['VMS2_BR_IFUP_DESC'] = '%'.join([CONFIG['bridge_name']] + brdesc)
 
                     if not nics:
                         nics = ['-nic', 'none']
