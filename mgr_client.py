@@ -53,7 +53,7 @@ def kill(name):
     """
     :returns: None in case of success, an error message otherwise
     """
-    _cmd('kill', vm_name=name)
+    ret = _cmd('kill', vm_name=name)
     if ret['status'] == 'success':
         return None
     elif ret['status'] == 'error':
